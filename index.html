@@ -214,6 +214,25 @@
   .btn-secondary:hover { background: #e6e9ef; }
   .drawer-err { color: #d83a52; font-size: 12px; margin-top: 6px; min-height: 16px; }
 
+  /* ── Searchable board dropdown ── */
+  .board-search-wrap { position: relative; }
+  .board-search-wrap input { width: 100%; }
+  .board-dd {
+    display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 500;
+    background: #fff; border: 1px solid #c3c6d4; border-radius: 6px;
+    max-height: 200px; overflow-y: auto;
+    box-shadow: 0 4px 12px rgba(0,0,0,.12); margin-top: 2px;
+  }
+  .board-dd.open { display: block; }
+  .board-opt {
+    padding: 8px 10px; cursor: pointer; font-size: 13px; color: #323338;
+    border-bottom: 1px solid #f0f2f8;
+  }
+  .board-opt:last-child { border-bottom: none; }
+  .board-opt:hover, .board-opt.hi { background: #f0f2f8; }
+  .board-opt.chosen { color: #0073ea; font-weight: 600; }
+  .board-no-res { padding: 8px 10px; font-size: 12px; color: #676879; font-style: italic; }
+
   /* ── Clockify connected state (settings drawer) ── */
   .ck-connected {
     display: flex; align-items: center; gap: 10px;
@@ -379,7 +398,12 @@
   </div>
   <div class="field">
     <label>Board <span class="req">*</span></label>
-    <select id="new-task-board"><option value="">Select a board…</option></select>
+    <div class="board-search-wrap">
+      <input id="new-task-board-search" type="text" placeholder="Search boards…" autocomplete="off"/>
+      <div class="board-dd" id="board-dd"></div>
+    </div>
+    <!-- Hidden field holds the selected board ID -->
+    <input type="hidden" id="new-task-board"/>
   </div>
   <div class="field">
     <label>Group / Section</label>
@@ -506,6 +530,7 @@ const CK_PROJ_STORE     = 'clockify_projects';
 // ── State ──
 let currentItems        = [];
 let cachedBoards        = [];
+let selectedBoardId     = '';   // tracks the chosen board in the searchable picker
 let currentUserId       = null;
 let groupBy             = localStorage.getItem(GROUP_KEY) || 'status';
 let isRefreshing        = false;
@@ -643,7 +668,6 @@ async function createTimeEntry(projectId, description, durationSecs) {
 }
 
 // ── Duration parser ──
-// Accepts: 1h 30m · 45m · 1:30 · 1.5h · 90 (plain number = minutes)
 function parseDuration(str) {
   if (!str) return null;
   str = str.trim().toLowerCase().replace(/\s+/g, '');
@@ -661,8 +685,7 @@ function parseDuration(str) {
   return secs > 0 ? Math.round(secs) : null;
 }
 
-// ── Project matcher ──
-// Matches by extracting the shared case code (e.g. ASG01-0002) from both names.
+// ── Project matcher — matches by ABC01-1234 style case code ──
 const CASE_CODE_RE = /[A-Z]{3}\d{2}-\d{4}/i;
 function extractCaseCode(str) {
   const m = (str || '').match(CASE_CODE_RE);
@@ -893,18 +916,19 @@ function parseBoardItems(boardMeta, boardResult, userId) {
   return found;
 }
 async function fetchMyItems(token, userId, onBatchDone) {
+  // ── Fetch all board kinds; include `type` so we can filter subitem boards ──
   const boardList = await gql(`{
-    publicBoards:    boards(limit:${MAX_BOARDS}, state:active, board_kind:public)   { id name columns { id type settings_str } }
-    privateBoards:   boards(limit:${MAX_BOARDS}, state:active, board_kind:private)  { id name columns { id type settings_str } }
-    shareableBoards: boards(limit:${MAX_BOARDS}, state:active, board_kind:share)    { id name columns { id type settings_str } }
+    publicBoards:    boards(limit:${MAX_BOARDS}, state:active, board_kind:public)   { id name type columns { id type settings_str } }
+    privateBoards:   boards(limit:${MAX_BOARDS}, state:active, board_kind:private)  { id name type columns { id type settings_str } }
+    shareableBoards: boards(limit:${MAX_BOARDS}, state:active, board_kind:share)    { id name type columns { id type settings_str } }
   }`, {}, token);
   const boardMap = new Map();
   [...(boardList.publicBoards||[]),...(boardList.privateBoards||[]),...(boardList.shareableBoards||[])]
+    .filter(b => b.type !== 'sub_items_board')   // ── exclude subitem boards ──
     .forEach(b => boardMap.set(b.id, b));
   const boards = [...boardMap.values()];
   saveBoardsCache(boards.map(b => ({ id: b.id, name: b.name })));
   cachedBoards = boards.map(b => ({ id: b.id, name: b.name }));
-  populateBoardPicker();
   const batches = chunk(boards, BATCH_SIZE), allItems = [];
   let completed = 0;
   const batchPromises = batches.map(async (batch) => {
@@ -952,43 +976,139 @@ async function fetchGroups(token, boardId) {
   return d.boards?.[0]?.groups || [];
 }
 
-// ── Board picker ──
-function populateBoardPicker() {
-  const sel = document.getElementById('new-task-board');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">Select a board…</option>';
-  [...cachedBoards].sort((a,b) => a.name.localeCompare(b.name)).forEach(b => {
-    const opt = document.createElement('option');
-    opt.value = b.id; opt.textContent = b.name;
-    if (b.id === current) opt.selected = true;
-    sel.appendChild(opt);
+// ── Searchable board picker ──
+const boardSearchInput = document.getElementById('new-task-board-search');
+const boardDd          = document.getElementById('board-dd');
+
+function renderBoardDropdown(query) {
+  const q = (query || '').toLowerCase();
+  const filtered = [...cachedBoards]
+    .filter(b => !q || b.name.toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  boardDd.innerHTML = '';
+  if (!filtered.length) {
+    const el = document.createElement('div');
+    el.className = 'board-no-res';
+    el.textContent = q ? 'No boards match your search.' : 'No boards available yet.';
+    boardDd.appendChild(el);
+    return;
+  }
+  filtered.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'board-opt' + (b.id === selectedBoardId ? ' chosen' : '');
+    el.textContent = b.name;
+    el.addEventListener('mousedown', e => {
+      e.preventDefault(); // prevents blur before the click registers
+      boardSearchInput.value = b.name;
+      document.getElementById('new-task-board').value = b.id;
+      selectedBoardId = b.id;
+      boardDd.classList.remove('open');
+      onBoardSelected(b.id);
+    });
+    boardDd.appendChild(el);
   });
 }
-document.getElementById('new-task-board').addEventListener('change', async function() {
+
+function populateBoardPicker() {
+  // Re-render the dropdown if it's currently open; otherwise data is fresh on next open.
+  if (boardDd.classList.contains('open')) {
+    renderBoardDropdown(boardSearchInput.value);
+  }
+}
+
+async function onBoardSelected(boardId) {
   const groupSel = document.getElementById('new-task-group');
-  if (!this.value) { groupSel.innerHTML = '<option value="">Select a board first…</option>'; groupSel.disabled = true; return; }
-  groupSel.innerHTML = '<option value="">Loading…</option>'; groupSel.disabled = true;
+  if (!boardId) {
+    groupSel.innerHTML = '<option value="">Select a board first…</option>';
+    groupSel.disabled = true;
+    return;
+  }
+  groupSel.innerHTML = '<option value="">Loading…</option>';
+  groupSel.disabled = true;
   try {
-    const groups = await fetchGroups(getToken(), this.value);
+    const groups = await fetchGroups(getToken(), boardId);
     groupSel.innerHTML = '<option value="">No specific group</option>';
     groups.forEach(g => {
-      const opt = document.createElement('option'); opt.value = g.id; opt.textContent = g.title; groupSel.appendChild(opt);
+      const opt = document.createElement('option');
+      opt.value = g.id; opt.textContent = g.title;
+      groupSel.appendChild(opt);
     });
     groupSel.disabled = false;
-  } catch { groupSel.innerHTML = '<option value="">Could not load groups</option>'; }
+  } catch {
+    groupSel.innerHTML = '<option value="">Could not load groups</option>';
+  }
+}
+
+boardSearchInput.addEventListener('focus', function() {
+  renderBoardDropdown(this.value);
+  boardDd.classList.add('open');
+});
+
+boardSearchInput.addEventListener('input', function() {
+  // Clear selection when user edits the text
+  selectedBoardId = '';
+  document.getElementById('new-task-board').value = '';
+  document.getElementById('new-task-group').innerHTML = '<option value="">Select a board first…</option>';
+  document.getElementById('new-task-group').disabled = true;
+  renderBoardDropdown(this.value);
+  boardDd.classList.add('open');
+});
+
+boardSearchInput.addEventListener('blur', function() {
+  setTimeout(() => {
+    boardDd.classList.remove('open');
+    // If user blurred without confirming a selection, clear the text
+    if (!selectedBoardId) {
+      this.value = '';
+      document.getElementById('new-task-board').value = '';
+    }
+  }, 150);
+});
+
+boardSearchInput.addEventListener('keydown', function(e) {
+  const opts = [...boardDd.querySelectorAll('.board-opt')];
+  let hiIdx  = opts.indexOf(boardDd.querySelector('.board-opt.hi'));
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    hiIdx = Math.min(hiIdx + 1, opts.length - 1);
+    opts.forEach(o => o.classList.remove('hi'));
+    if (opts[hiIdx]) { opts[hiIdx].classList.add('hi'); opts[hiIdx].scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    hiIdx = Math.max(hiIdx - 1, 0);
+    opts.forEach(o => o.classList.remove('hi'));
+    if (opts[hiIdx]) { opts[hiIdx].classList.add('hi'); opts[hiIdx].scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const hi = boardDd.querySelector('.board-opt.hi');
+    if (hi) hi.dispatchEvent(new MouseEvent('mousedown'));
+  } else if (e.key === 'Escape') {
+    boardDd.classList.remove('open');
+    this.blur();
+  }
 });
 
 // ── New task drawer ──
 function openDrawer() {
   document.getElementById('new-task-name').value = '';
+  // Reset searchable board picker
+  selectedBoardId = '';
+  boardSearchInput.value = '';
   document.getElementById('new-task-board').value = '';
+  boardDd.classList.remove('open');
+  // Populate picker data now so it's ready when the user focuses the input
+  // (cachedBoards is already up to date from the last load)
   document.getElementById('new-task-group').innerHTML = '<option value="">Select a board first…</option>';
   document.getElementById('new-task-group').disabled = true;
   document.getElementById('new-task-due').value = '';
   document.getElementById('drawer-err').textContent = '';
   document.getElementById('drawer-submit').disabled = false;
+  document.getElementById('drawer-submit').textContent = 'Create Task';
   document.getElementById('drawer-overlay').classList.add('open');
-  setTimeout(() => { document.getElementById('drawer').classList.add('open'); document.getElementById('new-task-name').focus(); }, 10);
+  setTimeout(() => {
+    document.getElementById('drawer').classList.add('open');
+    document.getElementById('new-task-name').focus();
+  }, 10);
 }
 function closeDrawer() {
   document.getElementById('drawer').classList.remove('open');
@@ -999,8 +1119,8 @@ document.getElementById('drawer-close').addEventListener('click', closeDrawer);
 document.getElementById('drawer-cancel').addEventListener('click', closeDrawer);
 document.getElementById('drawer-overlay').addEventListener('click', closeDrawer);
 document.getElementById('drawer-submit').addEventListener('click', async () => {
-  const name = document.getElementById('new-task-name').value.trim();
-  const boardId = document.getElementById('new-task-board').value;
+  const name    = document.getElementById('new-task-name').value.trim();
+  const boardId = selectedBoardId;  // use state var, not the hidden input directly
   const groupId = document.getElementById('new-task-group').value;
   const due     = document.getElementById('new-task-due').value;
   const errEl   = document.getElementById('drawer-err');
@@ -1171,7 +1291,7 @@ async function load(token) {
     setProgress(2);
   }
   const boardsCached = loadBoardsCache();
-  if (boardsCached.length) { cachedBoards = boardsCached; populateBoardPicker(); }
+  if (boardsCached.length) { cachedBoards = boardsCached; }
   try {
     const me = await fetchMe(token);
     currentUserId = me.id;
