@@ -58,7 +58,6 @@
   .stale-badge { font-size: 10px; color: #fff; background: #fdab3d; border-radius: 10px; padding: 1px 6px; display: none; }
   .stale-badge.visible { display: inline-block; }
 
-  /* Clockify dot */
   .c-dot {
     width: 7px; height: 7px; border-radius: 50%; background: #c3c6d4;
     flex-shrink: 0; cursor: pointer; transition: background .2s;
@@ -214,7 +213,7 @@
   .btn-secondary:hover { background: #e6e9ef; }
   .drawer-err { color: #d83a52; font-size: 12px; margin-top: 6px; min-height: 16px; }
 
-  /* ── Searchable board dropdown ── */
+  /* ── Searchable board / project dropdown ── */
   .board-search-wrap { position: relative; }
   .board-search-wrap input { width: 100%; }
   .board-dd {
@@ -402,7 +401,6 @@
       <input id="new-task-board-search" type="text" placeholder="Search boards…" autocomplete="off"/>
       <div class="board-dd" id="board-dd"></div>
     </div>
-    <!-- Hidden field holds the selected board ID -->
     <input type="hidden" id="new-task-board"/>
   </div>
   <div class="field">
@@ -440,7 +438,11 @@
   <div class="billing-task-label" id="billing-task-label"></div>
   <div class="field">
     <label>Clockify project</label>
-    <select id="billing-project"></select>
+    <div class="board-search-wrap">
+      <input id="billing-project-search" type="text" placeholder="Search projects…" autocomplete="off"/>
+      <div class="board-dd" id="billing-project-dd"></div>
+    </div>
+    <input type="hidden" id="billing-project-id"/>
   </div>
   <div class="field">
     <label>Duration <span class="req">*</span></label>
@@ -479,7 +481,7 @@
 <script>
 // ── Open popup ──
 let popupUrl = '';
-const popup = document.getElementById('open-popup');
+const popup    = document.getElementById('open-popup');
 const popupUrlEl = document.getElementById('open-popup-url');
 
 function showOpenPopup(url, anchorEl) {
@@ -514,23 +516,24 @@ document.addEventListener('click', e => {
 });
 
 // ── Constants ──
-const API               = 'https://api.monday.com/v2';
-const MONDAY_SUBDOMAIN  = 'tlatech-company';
-const STORAGE_KEY       = 'monday_api_token';
-const GROUP_KEY         = 'monday_group_by';
-const CACHE_KEY         = 'monday_items_cache';
-const BOARDS_CACHE_KEY  = 'monday_boards_cache';
-const BATCH_SIZE        = 10;
-const MAX_BOARDS        = 100;
-const CLOCKIFY_API      = 'https://api.clockify.me/api/v1';
-const CK_KEY_STORE      = 'clockify_api_key';
-const CK_WS_STORE       = 'clockify_workspace';
-const CK_PROJ_STORE     = 'clockify_projects';
+const API              = 'https://api.monday.com/v2';
+const MONDAY_SUBDOMAIN = 'tlatech-company';
+const STORAGE_KEY      = 'monday_api_token';
+const GROUP_KEY        = 'monday_group_by';
+const CACHE_KEY        = 'monday_items_cache';
+const BOARDS_CACHE_KEY = 'monday_boards_cache';
+const BATCH_SIZE       = 10;
+const BOARDS_PAGE_SIZE = 100;   // boards fetched per API page; paginated automatically
+const CLOCKIFY_API     = 'https://api.clockify.me/api/v1';
+const CK_KEY_STORE     = 'clockify_api_key';
+const CK_WS_STORE      = 'clockify_workspace';
+const CK_PROJ_STORE    = 'clockify_projects';
 
 // ── State ──
 let currentItems        = [];
 let cachedBoards        = [];
-let selectedBoardId     = '';   // tracks the chosen board in the searchable picker
+let selectedBoardId     = '';
+let selectedProjectId   = '';
 let currentUserId       = null;
 let groupBy             = localStorage.getItem(GROUP_KEY) || 'status';
 let isRefreshing        = false;
@@ -568,17 +571,19 @@ function updateClockifyDot() {
   const dot = document.getElementById('c-dot');
   const on = !!(getClockifyKey() && clockifyWorkspaceId);
   dot.classList.toggle('on', on);
-  dot.title = on ? `Clockify connected · ${clockifyProjects.length} project${clockifyProjects.length !== 1 ? 's' : ''}` : 'Clockify not connected';
+  dot.title = on
+    ? `Clockify connected · ${clockifyProjects.length} project${clockifyProjects.length !== 1 ? 's' : ''}`
+    : 'Clockify not connected';
 }
 
 // ── Monday token ──
-function getToken()    { return localStorage.getItem(STORAGE_KEY); }
-function saveToken(t)  { localStorage.setItem(STORAGE_KEY, t); }
-function clearToken()  { localStorage.removeItem(STORAGE_KEY); }
+function getToken()   { return localStorage.getItem(STORAGE_KEY); }
+function saveToken(t) { localStorage.setItem(STORAGE_KEY, t); }
+function clearToken() { localStorage.removeItem(STORAGE_KEY); }
 
 // ── Clockify token ──
-function getClockifyKey()  { return localStorage.getItem(CK_KEY_STORE); }
-function saveClockifyKey(k){ localStorage.setItem(CK_KEY_STORE, k); }
+function getClockifyKey()   { return localStorage.getItem(CK_KEY_STORE); }
+function saveClockifyKey(k) { localStorage.setItem(CK_KEY_STORE, k); }
 function clearClockifyData() {
   localStorage.removeItem(CK_KEY_STORE);
   localStorage.removeItem(CK_WS_STORE);
@@ -603,7 +608,7 @@ function clearCache() {
   localStorage.removeItem(BOARDS_CACHE_KEY);
 }
 
-// ── Show/hide views ──
+// ── Show / hide views ──
 function showSetup(err) {
   document.getElementById('setup').style.display = 'flex';
   document.getElementById('main').style.display  = 'none';
@@ -685,7 +690,7 @@ function parseDuration(str) {
   return secs > 0 ? Math.round(secs) : null;
 }
 
-// ── Project matcher — matches by ABC01-1234 style case code ──
+// ── Project matcher ──
 const CASE_CODE_RE = /[A-Z]{3}\d{2}-\d{4}/i;
 function extractCaseCode(str) {
   const m = (str || '').match(CASE_CODE_RE);
@@ -710,24 +715,104 @@ document.getElementById('nudge-link').addEventListener('click', () => {
   openSettings();
 });
 
+// ── Searchable Clockify project picker ──
+function renderProjectDropdown(query) {
+  const q  = (query || '').toLowerCase();
+  const dd = document.getElementById('billing-project-dd');
+  const filtered = [...clockifyProjects]
+    .filter(p => !q || p.name.toLowerCase().includes(q))
+    .sort((a, b) => {
+      if (a.id === selectedProjectId) return -1;
+      if (b.id === selectedProjectId) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  dd.innerHTML = '';
+  // "No project" option always appears first
+  const noneEl = document.createElement('div');
+  noneEl.className = 'board-opt' + (!selectedProjectId ? ' chosen' : '');
+  noneEl.textContent = 'No project selected';
+  noneEl.addEventListener('mousedown', e => {
+    e.preventDefault();
+    document.getElementById('billing-project-search').value = '';
+    document.getElementById('billing-project-id').value = '';
+    selectedProjectId = '';
+    dd.classList.remove('open');
+  });
+  dd.appendChild(noneEl);
+  if (!filtered.length && q) {
+    const el = document.createElement('div');
+    el.className = 'board-no-res';
+    el.textContent = 'No projects match your search.';
+    dd.appendChild(el);
+    return;
+  }
+  filtered.forEach(p => {
+    const el = document.createElement('div');
+    el.className = 'board-opt' + (p.id === selectedProjectId ? ' chosen' : '');
+    el.textContent = p.name;
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      document.getElementById('billing-project-search').value = p.name;
+      document.getElementById('billing-project-id').value = p.id;
+      selectedProjectId = p.id;
+      dd.classList.remove('open');
+    });
+    dd.appendChild(el);
+  });
+}
+
+const billingProjInput = document.getElementById('billing-project-search');
+const billingProjDd    = document.getElementById('billing-project-dd');
+
+billingProjInput.addEventListener('focus', function() {
+  renderProjectDropdown(this.value);
+  billingProjDd.classList.add('open');
+});
+billingProjInput.addEventListener('input', function() {
+  selectedProjectId = '';
+  document.getElementById('billing-project-id').value = '';
+  renderProjectDropdown(this.value);
+  billingProjDd.classList.add('open');
+});
+billingProjInput.addEventListener('blur', function() {
+  setTimeout(() => {
+    billingProjDd.classList.remove('open');
+    if (!selectedProjectId) {
+      this.value = '';
+      document.getElementById('billing-project-id').value = '';
+    }
+  }, 150);
+});
+billingProjInput.addEventListener('keydown', function(e) {
+  const opts = [...billingProjDd.querySelectorAll('.board-opt')];
+  let hiIdx  = opts.indexOf(billingProjDd.querySelector('.board-opt.hi'));
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    hiIdx = Math.min(hiIdx + 1, opts.length - 1);
+    opts.forEach(o => o.classList.remove('hi'));
+    if (opts[hiIdx]) { opts[hiIdx].classList.add('hi'); opts[hiIdx].scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    hiIdx = Math.max(hiIdx - 1, 0);
+    opts.forEach(o => o.classList.remove('hi'));
+    if (opts[hiIdx]) { opts[hiIdx].classList.add('hi'); opts[hiIdx].scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const hi = billingProjDd.querySelector('.board-opt.hi');
+    if (hi) hi.dispatchEvent(new MouseEvent('mousedown'));
+  } else if (e.key === 'Escape') {
+    billingProjDd.classList.remove('open');
+    this.blur();
+  }
+});
+
 // ── Billing modal ──
 function showBillingModal(item) {
   document.getElementById('billing-task-label').textContent = item.name;
-  const sel = document.getElementById('billing-project');
-  sel.innerHTML = '<option value="">No project selected</option>';
   const matched = matchProject(item.board);
-  [...clockifyProjects]
-    .sort((a, b) => {
-      if (matched && a.id === matched.id) return -1;
-      if (matched && b.id === matched.id) return 1;
-      return a.name.localeCompare(b.name);
-    })
-    .forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.id; opt.textContent = p.name;
-      if (matched && p.id === matched.id) opt.selected = true;
-      sel.appendChild(opt);
-    });
+  selectedProjectId = matched ? matched.id : '';
+  document.getElementById('billing-project-search').value = matched ? matched.name : '';
+  document.getElementById('billing-project-id').value = selectedProjectId;
   document.getElementById('billing-duration').value    = '';
   document.getElementById('billing-description').value = item.name;
   document.getElementById('billing-err').textContent   = '';
@@ -750,7 +835,7 @@ document.getElementById('billing-duration').addEventListener('keydown', e => {
 });
 document.getElementById('billing-submit').addEventListener('click', async () => {
   const durStr    = document.getElementById('billing-duration').value.trim();
-  const projectId = document.getElementById('billing-project').value;
+  const projectId = selectedProjectId;
   const desc      = document.getElementById('billing-description').value.trim();
   const errEl     = document.getElementById('billing-err');
   const btn       = document.getElementById('billing-submit');
@@ -867,12 +952,14 @@ const STATUS_COLORS = {
 };
 function statusColor(l) { return STATUS_COLORS[(l||'').toLowerCase()] || STATUS_COLORS.default; }
 
-// ── Monday data ──
+// ── Utilities ──
 function chunk(arr, n) {
   const out = [];
-  for (let i=0; i<arr.length; i+=n) out.push(arr.slice(i,i+n));
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
   return out;
 }
+
+// ── Board data parsers ──
 function parseBoardItems(boardMeta, boardResult, userId) {
   if (!boardResult) return [];
   const statusCol  = (boardMeta.columns||[]).find(c => c.type==='color'||c.type==='status');
@@ -881,7 +968,7 @@ function parseBoardItems(boardMeta, boardResult, userId) {
   if (statusCol?.settings_str) {
     try {
       const s = JSON.parse(statusCol.settings_str);
-      statusOptions = Object.entries(s.labels||{}).map(([idx,label]) => ({
+      statusOptions = Object.entries(s.labels||{}).map(([idx, label]) => ({
         index: parseInt(idx), label,
         color: s.labels_colors?.[idx]?.color || statusColor(label)
       }));
@@ -908,38 +995,60 @@ function parseBoardItems(boardMeta, boardResult, userId) {
     found.push({
       id: item.id, name: item.name,
       board: boardMeta.name, boardId: boardMeta.id,
-      status, statusIndex: currentOpt?.index??null,
-      statusColId: statusCol?.id||'status',
+      status, statusIndex: currentOpt?.index ?? null,
+      statusColId: statusCol?.id || 'status',
       statusOptions, due
     });
   }
   return found;
 }
-async function fetchMyItems(token, userId, onBatchDone) {
-  // ── Fetch all board kinds; include `type` so we can filter subitem boards ──
-  const boardList = await gql(`{
-    publicBoards:    boards(limit:${MAX_BOARDS}, state:active, board_kind:public)   { id name type columns { id type settings_str } }
-    privateBoards:   boards(limit:${MAX_BOARDS}, state:active, board_kind:private)  { id name type columns { id type settings_str } }
-    shareableBoards: boards(limit:${MAX_BOARDS}, state:active, board_kind:share)    { id name type columns { id type settings_str } }
-  }`, {}, token);
+
+// ── Paginated board fetch ──
+// Fetches all boards across as many pages as needed, handling workspaces
+// with more than 100 boards without a hard cap.
+async function fetchAllBoards(token) {
   const boardMap = new Map();
-  [...(boardList.publicBoards||[]),...(boardList.privateBoards||[]),...(boardList.shareableBoards||[])]
-    .filter(b => b.type !== 'sub_items_board')   // ── exclude subitem boards ──
-    .forEach(b => boardMap.set(b.id, b));
-  const boards = [...boardMap.values()];
+  let page = 1;
+  while (true) {
+    const data = await gql(`{
+      pub:   boards(limit:${BOARDS_PAGE_SIZE}, page:${page}, state:active, board_kind:public)   { id name type columns { id type settings_str } }
+      priv:  boards(limit:${BOARDS_PAGE_SIZE}, page:${page}, state:active, board_kind:private)  { id name type columns { id type settings_str } }
+      share: boards(limit:${BOARDS_PAGE_SIZE}, page:${page}, state:active, board_kind:share)    { id name type columns { id type settings_str } }
+    }`, {}, token);
+    const pageBoards = [
+      ...(data.pub   || []),
+      ...(data.priv  || []),
+      ...(data.share || [])
+    ].filter(b => b.type !== 'sub_items_board');
+    pageBoards.forEach(b => boardMap.set(b.id, b));
+    // Stop when every kind returned fewer results than the page size —
+    // meaning there are no more pages to fetch.
+    const maxReturned = Math.max(
+      (data.pub   || []).length,
+      (data.priv  || []).length,
+      (data.share || []).length
+    );
+    if (maxReturned < BOARDS_PAGE_SIZE) break;
+    page++;
+  }
+  return [...boardMap.values()];
+}
+
+async function fetchMyItems(token, userId, onBatchDone) {
+  const boards = await fetchAllBoards(token);
   saveBoardsCache(boards.map(b => ({ id: b.id, name: b.name })));
   cachedBoards = boards.map(b => ({ id: b.id, name: b.name }));
   const batches = chunk(boards, BATCH_SIZE), allItems = [];
   let completed = 0;
   const batchPromises = batches.map(async (batch) => {
-    const aliasQ = batch.map((b,i) =>
+    const aliasQ = batch.map((b, i) =>
       `b${i}: boards(ids:[${b.id}]) { id items_page(limit:100) { items { id name column_values { id type text value } } } }`
     ).join('\n');
     let batchData;
     try { batchData = await gql(`{ ${aliasQ} }`, {}, token); }
     catch { completed++; onBatchDone(Math.round((completed/batches.length)*100)); return; }
     const batchItems = [];
-    for (let i=0; i<batch.length; i++)
+    for (let i = 0; i < batch.length; i++)
       batchItems.push(...parseBoardItems(batch[i], batchData[`b${i}`]?.[0], userId));
     completed++;
     allItems.push(...batchItems);
@@ -948,6 +1057,7 @@ async function fetchMyItems(token, userId, onBatchDone) {
   await Promise.all(batchPromises);
   return allItems;
 }
+
 async function updateStatus(token, itemId, boardId, colId, statusIndex) {
   await gql(
     `mutation($boardId:ID!,$itemId:ID!,$colId:String!,$val:JSON!){
@@ -998,7 +1108,7 @@ function renderBoardDropdown(query) {
     el.className = 'board-opt' + (b.id === selectedBoardId ? ' chosen' : '');
     el.textContent = b.name;
     el.addEventListener('mousedown', e => {
-      e.preventDefault(); // prevents blur before the click registers
+      e.preventDefault();
       boardSearchInput.value = b.name;
       document.getElementById('new-task-board').value = b.id;
       selectedBoardId = b.id;
@@ -1007,13 +1117,6 @@ function renderBoardDropdown(query) {
     });
     boardDd.appendChild(el);
   });
-}
-
-function populateBoardPicker() {
-  // Re-render the dropdown if it's currently open; otherwise data is fresh on next open.
-  if (boardDd.classList.contains('open')) {
-    renderBoardDropdown(boardSearchInput.value);
-  }
 }
 
 async function onBoardSelected(boardId) {
@@ -1043,9 +1146,7 @@ boardSearchInput.addEventListener('focus', function() {
   renderBoardDropdown(this.value);
   boardDd.classList.add('open');
 });
-
 boardSearchInput.addEventListener('input', function() {
-  // Clear selection when user edits the text
   selectedBoardId = '';
   document.getElementById('new-task-board').value = '';
   document.getElementById('new-task-group').innerHTML = '<option value="">Select a board first…</option>';
@@ -1053,18 +1154,15 @@ boardSearchInput.addEventListener('input', function() {
   renderBoardDropdown(this.value);
   boardDd.classList.add('open');
 });
-
 boardSearchInput.addEventListener('blur', function() {
   setTimeout(() => {
     boardDd.classList.remove('open');
-    // If user blurred without confirming a selection, clear the text
     if (!selectedBoardId) {
       this.value = '';
       document.getElementById('new-task-board').value = '';
     }
   }, 150);
 });
-
 boardSearchInput.addEventListener('keydown', function(e) {
   const opts = [...boardDd.querySelectorAll('.board-opt')];
   let hiIdx  = opts.indexOf(boardDd.querySelector('.board-opt.hi'));
@@ -1091,13 +1189,10 @@ boardSearchInput.addEventListener('keydown', function(e) {
 // ── New task drawer ──
 function openDrawer() {
   document.getElementById('new-task-name').value = '';
-  // Reset searchable board picker
   selectedBoardId = '';
   boardSearchInput.value = '';
   document.getElementById('new-task-board').value = '';
   boardDd.classList.remove('open');
-  // Populate picker data now so it's ready when the user focuses the input
-  // (cachedBoards is already up to date from the last load)
   document.getElementById('new-task-group').innerHTML = '<option value="">Select a board first…</option>';
   document.getElementById('new-task-group').disabled = true;
   document.getElementById('new-task-due').value = '';
@@ -1120,7 +1215,7 @@ document.getElementById('drawer-cancel').addEventListener('click', closeDrawer);
 document.getElementById('drawer-overlay').addEventListener('click', closeDrawer);
 document.getElementById('drawer-submit').addEventListener('click', async () => {
   const name    = document.getElementById('new-task-name').value.trim();
-  const boardId = selectedBoardId;  // use state var, not the hidden input directly
+  const boardId = selectedBoardId;
   const groupId = document.getElementById('new-task-group').value;
   const due     = document.getElementById('new-task-due').value;
   const errEl   = document.getElementById('drawer-err');
@@ -1160,7 +1255,7 @@ function buildStatusPill(item, token) {
   document.body.appendChild(menu);
   for (const opt of item.statusOptions) {
     const row = document.createElement('div');
-    row.className = 'status-option'+(opt.label===item.status?' current':'');
+    row.className = 'status-option' + (opt.label===item.status ? ' current' : '');
     row.innerHTML = `<span class="opt-dot" style="background:${opt.color}"></span>${escHtml(opt.label)}`;
     row.addEventListener('click', async e => {
       e.stopPropagation();
@@ -1178,7 +1273,6 @@ function buildStatusPill(item, token) {
         saveCache(currentItems);
         showToast('✓ Status updated');
         renderBoard(currentItems, token);
-        // ── Clockify billing prompt ──
         if (getClockifyKey() && clockifyWorkspaceId) {
           setTimeout(() => showBillingModal(item), 700);
         } else {
@@ -1195,13 +1289,13 @@ function buildStatusPill(item, token) {
     e.stopPropagation();
     const wasOpen = menu.classList.contains('open');
     closeAllMenus();
-    if (!wasOpen && item.statusOptions.length>0) {
+    if (!wasOpen && item.statusOptions.length > 0) {
       const rect = pill.getBoundingClientRect(), mw = 180;
-      let left = rect.right - mw; if (left<8) left=8;
+      let left = rect.right - mw; if (left < 8) left = 8;
       let top = rect.bottom + 4;
-      const estH = Math.min(item.statusOptions.length*36, 220);
-      if (top+estH > window.innerHeight-8) top = rect.top - estH - 4;
-      menu.style.left=`${left}px`; menu.style.top=`${top}px`; menu.style.width=`${mw}px`;
+      const estH = Math.min(item.statusOptions.length * 36, 220);
+      if (top + estH > window.innerHeight - 8) top = rect.top - estH - 4;
+      menu.style.left = `${left}px`; menu.style.top = `${top}px`; menu.style.width = `${mw}px`;
       menu.classList.add('open');
     }
   });
@@ -1209,7 +1303,7 @@ function buildStatusPill(item, token) {
   return wrap;
 }
 function buildCard(item, token) {
-  const due = formatDue(item.due);
+  const due  = formatDue(item.due);
   const card = document.createElement('div'); card.className = 'card';
   const top  = document.createElement('div'); top.className  = 'card-top';
   const name = document.createElement('div'); name.className = 'card-name';
@@ -1221,7 +1315,9 @@ function buildCard(item, token) {
   top.appendChild(name); top.appendChild(buildStatusPill(item, token));
   const meta = document.createElement('div'); meta.className = 'card-meta';
   if (groupBy==='status') meta.innerHTML += `<span class="meta-tag board" title="${escHtml(item.board)}">${escHtml(item.board)}</span>`;
-  meta.innerHTML += due ? `<span class="meta-tag ${due.cls}">${due.label}</span>` : `<span class="meta-tag nodue">No due date</span>`;
+  meta.innerHTML += due
+    ? `<span class="meta-tag ${due.cls}">${due.label}</span>`
+    : `<span class="meta-tag nodue">No due date</span>`;
   card.appendChild(top); card.appendChild(meta);
   return card;
 }
@@ -1244,30 +1340,31 @@ function renderBoard(items, token) {
   const groups = {};
   for (const item of items) {
     const key = groupBy==='board' ? item.board : item.status;
-    if (!groups[key]) groups[key]=[];
+    if (!groups[key]) groups[key] = [];
     groups[key].push(item);
   }
-  Object.keys(groups).sort((a,b) => {
+  Object.keys(groups).sort((a, b) => {
     if (groupBy==='status') {
-      const aD=/done|complet/i.test(a)?1:0, bD=/done|complet/i.test(b)?1:0;
-      return aD-bD || a.localeCompare(b);
+      const aD = /done|complet/i.test(a) ? 1 : 0, bD = /done|complet/i.test(b) ? 1 : 0;
+      return aD - bD || a.localeCompare(b);
     }
     return a.localeCompare(b);
   }).forEach(key => {
     const grpItems = groups[key];
-    const grp = document.createElement('div'); grp.className='group';
+    const grp = document.createElement('div'); grp.className = 'group';
     const dotColor = groupBy==='status' ? statusColor(key) : '#0073ea';
-    const hdr = document.createElement('div'); hdr.className='group-header';
-    hdr.innerHTML=`
+    const hdr = document.createElement('div'); hdr.className = 'group-header';
+    hdr.innerHTML = `
       <span class="group-dot" style="background:${dotColor}"></span>
       <span class="group-label">${escHtml(key)}</span>
       <span class="group-count">${grpItems.length}</span>
-      <span class="chevron open">▶</span>`;
-    const cards = document.createElement('div'); cards.className='cards';
+      <span class="chevron">▶</span>`;
+    const cards = document.createElement('div'); cards.className = 'cards';
+    cards.style.display = 'none'; // collapsed by default
     for (const item of grpItems) cards.appendChild(buildCard(item, token));
     hdr.addEventListener('click', () => {
-      const open = cards.style.display!=='none';
-      cards.style.display = open?'none':'flex';
+      const open = cards.style.display !== 'none';
+      cards.style.display = open ? 'none' : 'flex';
       hdr.querySelector('.chevron').classList.toggle('open', !open);
     });
     grp.appendChild(hdr); grp.appendChild(cards); boardEl.appendChild(grp);
@@ -1279,15 +1376,15 @@ async function load(token) {
   if (isRefreshing) return;
   isRefreshing = true;
   const cached = loadCache();
-  if (cached && cached.length>0) {
+  if (cached && cached.length > 0) {
     currentItems = cached;
-    document.getElementById('initial-loading').style.display='none';
+    document.getElementById('initial-loading').style.display = 'none';
     renderBoard(currentItems, token);
     setStaleBadge(true); setProgress(2);
   } else {
-    document.getElementById('initial-loading').style.display='flex';
-    document.getElementById('board').innerHTML='';
-    document.getElementById('summary').textContent='';
+    document.getElementById('initial-loading').style.display = 'flex';
+    document.getElementById('board').innerHTML = '';
+    document.getElementById('summary').textContent = '';
     setProgress(2);
   }
   const boardsCached = loadBoardsCache();
@@ -1298,9 +1395,9 @@ async function load(token) {
     const freshItems = [];
     await fetchMyItems(token, me.id, (pct, batchItems) => {
       setProgress(pct);
-      if (batchItems && batchItems.length>0) {
+      if (batchItems && batchItems.length > 0) {
         freshItems.push(...batchItems);
-        document.getElementById('initial-loading').style.display='none';
+        document.getElementById('initial-loading').style.display = 'none';
         currentItems = [...freshItems];
         renderBoard(currentItems, token);
       }
@@ -1315,12 +1412,12 @@ async function load(token) {
   } catch(e) {
     console.error('Monday plugin load error:', e);
     if (!currentItems.length) {
-      document.getElementById('initial-loading').style.display='none';
-      document.getElementById('board').innerHTML=`<div class="empty-state" style="color:#d83a52">
+      document.getElementById('initial-loading').style.display = 'none';
+      document.getElementById('board').innerHTML = `<div class="empty-state" style="color:#d83a52">
         <span>⚠ ${escHtml(e.message)}</span>
         <span style="font-size:11px;color:#999">Check your token or network.</span></div>`;
     } else { showToast('⚠ Refresh failed — showing cached tasks', 3000); }
-  } finally { setStaleBadge(false); isRefreshing=false; }
+  } finally { setStaleBadge(false); isRefreshing = false; }
 }
 
 // ── Setup wiring ──
