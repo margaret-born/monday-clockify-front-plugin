@@ -801,6 +801,8 @@ function renderProjectDropdown(query) {
       return a.name.localeCompare(b.name);
     });
   dd.innerHTML = '';
+  // Show hint only when the create option is visible (i.e. user has typed a query)
+  document.getElementById('billing-project-hint').style.display = q ? 'block' : 'none';
 
   // "No project" option
   const noneEl = document.createElement('div');
@@ -881,6 +883,7 @@ billingProjInput.addEventListener('input', function() {
 billingProjInput.addEventListener('blur', function() {
   setTimeout(() => {
     billingProjDd.classList.remove('open');
+    hideBillingProjectHint();
     if (!selectedProjectId) {
       document.getElementById('billing-project-id').value = '';
     }
@@ -917,8 +920,8 @@ function showBillingModal(item) {
   // Pre-fill with matched project name, or the board name as an editable default
   document.getElementById('billing-project-search').value = matched ? matched.name : item.board;
   document.getElementById('billing-project-id').value = selectedProjectId;
-  // Show the case code hint only when no existing project was matched
-  document.getElementById('billing-project-hint').style.display = matched ? 'none' : 'block';
+  // Hint is hidden on open — it only appears when the user is actively creating a new project
+  document.getElementById('billing-project-hint').style.display = 'none';
   document.getElementById('billing-duration').value    = '';
   document.getElementById('billing-description').value = item.name;
   document.getElementById('billing-err').textContent   = '';
