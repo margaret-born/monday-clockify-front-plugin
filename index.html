@@ -639,11 +639,11 @@ let isRefreshing        = false;
 let clockifyWorkspaceId = localStorage.getItem(CK_WS_STORE) || null;
 let clockifyProjects    = [];
 let nudgeTimer          = null;
-let pendingCreateName   = null; // set when dropdown is in client-picker or confirm mode
-let ckClients           = [];   // cached client list for current session
-let pendingClientId     = null; // selected client ID awaiting confirmation
-let pendingClientName   = null; // selected client name awaiting confirmation
-let pendingConfirm      = false; // true when in confirmation view
+let pendingCreateName   = null;
+let ckClients           = [];
+let pendingClientId     = null;
+let pendingClientName   = null;
+let pendingConfirm      = false;
 
 try { clockifyProjects = JSON.parse(localStorage.getItem(CK_PROJ_STORE)) || []; } catch {}
 
@@ -800,7 +800,7 @@ async function ckCreateProject(name, clientId) {
   return proj;
 }
 
-// ── Refresh project list (strips archived/deleted since last sync) ──
+// ── Refresh project list ──
 async function refreshClockifyProjects() {
   if (!getClockifyKey() || !clockifyWorkspaceId) return;
   try {
@@ -813,7 +813,7 @@ async function refreshClockifyProjects() {
       localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
       updateClockifyDot();
     }
-  } catch { /* silent — stale cache is preferable to surfacing a network error */ }
+  } catch {}
 }
 
 // ── Fetch clients ──
@@ -927,6 +927,15 @@ function renderConfirmationView(projectName) {
   });
   dd.appendChild(details);
 
+  // ── Case code reminder ──
+  const hasCaseCode = /[A-Z]{3}\d{2}-\d{4}/i.test(projectName);
+  if (!hasCaseCode) {
+    const reminder = document.createElement('div');
+    reminder.style.cssText = 'font-size:11px;color:#c97d00;background:#fffbf0;border-radius:5px;padding:6px 10px;margin:0 10px 6px;line-height:1.5';
+    reminder.textContent = '⚠ Project name is missing a case code (e.g. ABC01-2345). Go back to add it so this project links correctly to your Monday board.';
+    dd.appendChild(reminder);
+  }
+
   const actions = document.createElement('div');
   actions.className = 'confirm-actions';
 
@@ -1011,7 +1020,6 @@ document.getElementById('nudge-link').addEventListener('click', () => {
 
 // ── Searchable Clockify project picker ──
 function renderProjectDropdown(query) {
-  // Confirmation view takes priority over client picker
   if (pendingCreateName && pendingConfirm) { renderConfirmationView(pendingCreateName); return; }
   if (pendingCreateName) { renderClientPicker(pendingCreateName); return; }
 
@@ -1027,7 +1035,6 @@ function renderProjectDropdown(query) {
   dd.innerHTML = '';
   document.getElementById('billing-project-hint').style.display = q ? 'block' : 'none';
 
-  // "No project" option
   const noneEl = document.createElement('div');
   noneEl.className = 'board-opt' + (!selectedProjectId ? ' chosen' : '');
   noneEl.textContent = 'No project selected';
@@ -1063,7 +1070,6 @@ function renderProjectDropdown(query) {
     });
   }
 
-  // ── Create project option — with duplicate protection ──
   if (q) {
     const exactHit = clockifyProjects.find(p => isExactMatch(query, p.name));
 
@@ -1151,7 +1157,7 @@ billingProjInput.addEventListener('keydown', function(e) {
 
 // ── Billing modal ──
 function showBillingModal(item) {
-  refreshClockifyProjects(); // background refresh — stale archived/deleted projects drop out before user picks
+  refreshClockifyProjects();
   document.getElementById('billing-task-label').textContent = item.name;
   const matched = matchProject(item.board);
   selectedProjectId = matched ? matched.id : '';
@@ -1821,7 +1827,7 @@ async function load(token) {
   const boardsCached = loadBoardsCache();
   if (boardsCached.length) { cachedBoards = boardsCached; }
   try {
-    refreshClockifyProjects(); // background refresh on every plugin load
+    refreshClockifyProjects();
     const me = await fetchMe(token);
     currentUserId = me.id;
     const freshItems = [];
