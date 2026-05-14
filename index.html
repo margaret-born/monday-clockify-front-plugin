@@ -972,12 +972,12 @@ function parseDuration(str) {
   const colon = str.match(/^(\d+):(\d{2})$/);
   if (colon) return (parseInt(colon[1]) * 60 + parseInt(colon[2])) * 60;
   let secs = 0, matched = false;
-  const h = str.match(/(\d+(?:\.\d+)?)h/);
-  const m = str.match(/(\d+(?:\.\d+)?)m/);
+  const h = str.match(/((?:\d+(?:\.\d*)?|\.\d+))h/);
+  const m = str.match(/((?:\d+(?:\.\d*)?|\.\d+))m/);
   if (h) { secs += parseFloat(h[1]) * 3600; matched = true; }
   if (m) { secs += parseFloat(m[1]) * 60;   matched = true; }
   if (!matched) {
-    const n = str.match(/^(\d+(?:\.\d+)?)$/);
+    const n = str.match(/^((?:\d+(?:\.\d*)?|\.\d+))$/);
     if (n) secs = str.includes('.') ? parseFloat(n[1]) * 3600 : parseFloat(n[1]) * 60;
     else return null;
   }
@@ -1821,6 +1821,7 @@ async function load(token) {
   const boardsCached = loadBoardsCache();
   if (boardsCached.length) { cachedBoards = boardsCached; }
   try {
+    refreshClockifyProjects(); // background refresh on every plugin load
     const me = await fetchMe(token);
     currentUserId = me.id;
     const freshItems = [];
