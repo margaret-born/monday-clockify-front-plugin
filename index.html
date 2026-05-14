@@ -240,7 +240,7 @@
   .board-dd {
     display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 500;
     background: #fff; border: 1px solid #c3c6d4; border-radius: 6px;
-    max-height: 200px; overflow-y: auto;
+    max-height: 240px; overflow-y: auto;
     box-shadow: 0 4px 12px rgba(0,0,0,.12); margin-top: 2px;
   }
   .board-dd.open { display: block; }
@@ -273,12 +273,38 @@
     border-top: 1px solid #e6e9ef; background: #f6f7fb;
   }
 
-  /* ── Client picker header ── */
+  /* ── Client picker / confirm header ── */
   .client-picker-hdr {
     padding: 7px 10px; font-size: 11px; font-weight: 600; color: #676879;
     text-transform: uppercase; letter-spacing: .4px;
     background: #f6f7fb; border-bottom: 1px solid #e6e9ef;
   }
+
+  /* ── Confirm view detail rows ── */
+  .confirm-details { padding: 10px 10px 4px; }
+  .confirm-row { margin-bottom: 8px; }
+  .confirm-row-label {
+    font-size: 10px; font-weight: 600; color: #676879;
+    text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px;
+  }
+  .confirm-row-value {
+    font-size: 12px; color: #323338;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .confirm-actions {
+    display: flex; gap: 6px; padding: 8px 10px 10px;
+    border-top: 1px solid #e6e9ef; margin-top: 2px;
+  }
+  .confirm-back {
+    flex: 1; padding: 7px; background: #f0f2f8; color: #323338;
+    border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;
+  }
+  .confirm-back:hover { background: #e6e9ef; }
+  .confirm-create {
+    flex: 2; padding: 7px; background: #0073ea; color: #fff;
+    border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .confirm-create:hover { background: #0060c0; }
 
   /* ── Clockify connected state (settings drawer) ── */
   .ck-connected {
@@ -613,8 +639,11 @@ let isRefreshing        = false;
 let clockifyWorkspaceId = localStorage.getItem(CK_WS_STORE) || null;
 let clockifyProjects    = [];
 let nudgeTimer          = null;
-let pendingCreateName   = null; // set when dropdown is in client-picker mode
+let pendingCreateName   = null; // set when dropdown is in client-picker or confirm mode
 let ckClients           = [];   // cached client list for current session
+let pendingClientId     = null; // selected client ID awaiting confirmation
+let pendingClientName   = null; // selected client name awaiting confirmation
+let pendingConfirm      = false; // true when in confirmation view
 
 try { clockifyProjects = JSON.parse(localStorage.getItem(CK_PROJ_STORE)) || []; } catch {}
 
@@ -652,6 +681,12 @@ function updateClockifyDot() {
 }
 function hideBillingProjectHint() {
   document.getElementById('billing-project-hint').style.display = 'none';
+}
+function resetCreateFlow() {
+  pendingCreateName = null;
+  pendingClientId   = null;
+  pendingClientName = null;
+  pendingConfirm    = false;
 }
 
 // ── Monday token ──
@@ -765,6 +800,22 @@ async function ckCreateProject(name, clientId) {
   return proj;
 }
 
+// ── Refresh project list (strips archived/deleted since last sync) ──
+async function refreshClockifyProjects() {
+  if (!getClockifyKey() || !clockifyWorkspaceId) return;
+  try {
+    const projs = await ckFetch(
+      `/workspaces/${clockifyWorkspaceId}/projects?archived=false&page-size=500`,
+      getClockifyKey()
+    );
+    if (Array.isArray(projs)) {
+      clockifyProjects = projs;
+      localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
+      updateClockifyDot();
+    }
+  } catch { /* silent — stale cache is preferable to surfacing a network error */ }
+}
+
 // ── Fetch clients ──
 async function ckFetchClients() {
   try {
@@ -783,21 +834,19 @@ function isExactMatch(query, projectName) {
 function isCloseMatch(query, projectName) {
   const q = query.trim().toLowerCase();
   const p = projectName.trim().toLowerCase();
-  if (q === p) return false; // exact match handled separately
-  // Case code match (strongest signal)
+  if (q === p) return false;
   const qCode = extractCaseCode(query), pCode = extractCaseCode(projectName);
   if (qCode && pCode && qCode === pCode) return true;
-  // Substring match — require at least 4 chars to avoid noise
   if (q.length >= 4 && p.includes(q)) return true;
   if (p.length >= 4 && q.includes(p)) return true;
   return false;
 }
 
-// ── Client picker & project creation ──
+// ── Project creation flow ──
 async function doCreateProject(name, clientId) {
   const dd = document.getElementById('billing-project-dd');
   dd.innerHTML = '<div class="board-no-res">Creating project…</div>';
-  pendingCreateName = null;
+  resetCreateFlow();
   try {
     const proj = await ckCreateProject(name, clientId);
     document.getElementById('billing-project-search').value = proj.name;
@@ -808,7 +857,7 @@ async function doCreateProject(name, clientId) {
     showToast('✓ Project created in Clockify');
   } catch(err) {
     dd.innerHTML = `<div class="board-no-res" style="color:#d83a52">Failed: ${escHtml(err.message)}</div>`;
-    setTimeout(() => { pendingCreateName = null; dd.classList.remove('open'); }, 2500);
+    setTimeout(() => { dd.classList.remove('open'); }, 2500);
   }
 }
 
@@ -829,7 +878,10 @@ function renderClientPicker(projectName) {
       const el = document.createElement('div');
       el.className = 'board-opt';
       el.textContent = client.name;
-      el.addEventListener('mousedown', e => { e.preventDefault(); doCreateProject(projectName, client.id); });
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        showConfirmation(projectName, client.id, client.name);
+      });
       dd.appendChild(el);
     });
   }
@@ -837,6 +889,72 @@ function renderClientPicker(projectName) {
   notice.className = 'create-project-suppress';
   notice.textContent = "Client not listed? Confirm with the Head of CS that you're okay to add a new client, then do so directly from Clockify's site to associate projects with them moving forward.";
   dd.appendChild(notice);
+}
+
+function showConfirmation(projectName, clientId, clientName) {
+  pendingClientId   = clientId;
+  pendingClientName = clientName;
+  pendingConfirm    = true;
+  renderConfirmationView(projectName);
+  billingProjDd.classList.add('open');
+}
+
+function renderConfirmationView(projectName) {
+  const taskName = document.getElementById('billing-task-label').textContent;
+  const dd = document.getElementById('billing-project-dd');
+  dd.innerHTML = '';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'client-picker-hdr';
+  hdr.textContent = 'Confirm new project';
+  dd.appendChild(hdr);
+
+  const details = document.createElement('div');
+  details.className = 'confirm-details';
+  [['Project', projectName], ['Client', pendingClientName], ['Task', taskName]].forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'confirm-row';
+    const lbl = document.createElement('div');
+    lbl.className = 'confirm-row-label';
+    lbl.textContent = label;
+    const val = document.createElement('div');
+    val.className = 'confirm-row-value';
+    val.textContent = value;
+    val.title = value;
+    row.appendChild(lbl);
+    row.appendChild(val);
+    details.appendChild(row);
+  });
+  dd.appendChild(details);
+
+  const actions = document.createElement('div');
+  actions.className = 'confirm-actions';
+
+  const backBtn = document.createElement('button');
+  backBtn.className = 'confirm-back';
+  backBtn.textContent = '← Back';
+  backBtn.addEventListener('mousedown', e => {
+    e.preventDefault();
+    pendingConfirm    = false;
+    pendingClientId   = null;
+    pendingClientName = null;
+    renderClientPicker(projectName);
+    billingProjDd.classList.add('open');
+  });
+
+  const confirmBtn = document.createElement('button');
+  confirmBtn.className = 'confirm-create';
+  confirmBtn.textContent = 'Confirm & Create';
+  confirmBtn.addEventListener('mousedown', async e => {
+    e.preventDefault();
+    const cid = pendingClientId;
+    pendingConfirm = false;
+    await doCreateProject(projectName, cid);
+  });
+
+  actions.appendChild(backBtn);
+  actions.appendChild(confirmBtn);
+  dd.appendChild(actions);
 }
 
 async function createTimeEntry(projectId, description, durationSecs) {
@@ -893,7 +1011,8 @@ document.getElementById('nudge-link').addEventListener('click', () => {
 
 // ── Searchable Clockify project picker ──
 function renderProjectDropdown(query) {
-  // If we're in client-picker mode, hand off to that renderer
+  // Confirmation view takes priority over client picker
+  if (pendingCreateName && pendingConfirm) { renderConfirmationView(pendingCreateName); return; }
   if (pendingCreateName) { renderClientPicker(pendingCreateName); return; }
 
   const q  = (query || '').toLowerCase();
@@ -949,25 +1068,21 @@ function renderProjectDropdown(query) {
     const exactHit = clockifyProjects.find(p => isExactMatch(query, p.name));
 
     if (exactHit) {
-      // Suppress: project already exists under this exact name
       const suppressEl = document.createElement('div');
       suppressEl.className = 'create-project-suppress';
       suppressEl.textContent = `"${exactHit.name}" already exists — select it above.`;
       dd.appendChild(suppressEl);
-
     } else {
       const closeMatches = clockifyProjects.filter(p => isCloseMatch(query, p.name));
       const createEl = document.createElement('div');
 
       if (closeMatches.length) {
-        // Warn: similar project(s) found, require deliberate second click
         createEl.className = 'board-opt create-project-warn';
         const similarLabel = closeMatches.length === 1
           ? `"${closeMatches[0].name}"`
           : `${closeMatches.length} similar projects`;
         createEl.textContent = `＋ Create "${query}" — similar to ${similarLabel}. Create anyway?`;
       } else {
-        // Clear path: no conflicts found
         createEl.className = 'board-opt create-project-opt';
         createEl.textContent = `＋ Create "${query}" in Clockify`;
       }
@@ -995,7 +1110,7 @@ billingProjInput.addEventListener('focus', function() {
 });
 billingProjInput.addEventListener('input', function() {
   selectedProjectId = '';
-  pendingCreateName = null;
+  resetCreateFlow();
   document.getElementById('billing-project-id').value = '';
   renderProjectDropdown(this.value);
   billingProjDd.classList.add('open');
@@ -1004,7 +1119,7 @@ billingProjInput.addEventListener('blur', function() {
   setTimeout(() => {
     billingProjDd.classList.remove('open');
     hideBillingProjectHint();
-    pendingCreateName = null;
+    resetCreateFlow();
     if (!selectedProjectId) {
       document.getElementById('billing-project-id').value = '';
     }
@@ -1028,7 +1143,7 @@ billingProjInput.addEventListener('keydown', function(e) {
     const hi = billingProjDd.querySelector('.board-opt.hi');
     if (hi) hi.dispatchEvent(new MouseEvent('mousedown'));
   } else if (e.key === 'Escape') {
-    pendingCreateName = null;
+    resetCreateFlow();
     billingProjDd.classList.remove('open');
     this.blur();
   }
@@ -1036,6 +1151,7 @@ billingProjInput.addEventListener('keydown', function(e) {
 
 // ── Billing modal ──
 function showBillingModal(item) {
+  refreshClockifyProjects(); // background refresh — stale archived/deleted projects drop out before user picks
   document.getElementById('billing-task-label').textContent = item.name;
   const matched = matchProject(item.board);
   selectedProjectId = matched ? matched.id : '';
@@ -1047,7 +1163,7 @@ function showBillingModal(item) {
   document.getElementById('billing-err').textContent   = '';
   document.getElementById('billing-submit').disabled   = false;
   document.getElementById('billing-submit').textContent = 'Log Time';
-  pendingCreateName = null;
+  resetCreateFlow();
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('billing-modal').classList.add('open');
   setTimeout(() => document.getElementById('billing-duration').focus(), 50);
@@ -1055,7 +1171,7 @@ function showBillingModal(item) {
 function hideBillingModal() {
   document.getElementById('modal-overlay').classList.remove('open');
   document.getElementById('billing-modal').classList.remove('open');
-  pendingCreateName = null;
+  resetCreateFlow();
 }
 
 document.getElementById('billing-skip').addEventListener('click', hideBillingModal);
