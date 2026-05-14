@@ -260,6 +260,26 @@
   }
   .create-project-opt:hover { background: #f0f8ff; }
 
+  /* ── Create project — duplicate warning ── */
+  .create-project-warn {
+    color: #c97d00 !important; background: #fffbf0;
+    border-top: 1px solid #e6e9ef !important; font-weight: 500;
+  }
+  .create-project-warn:hover { background: #fff3d6 !important; }
+
+  /* ── Create project — suppressed (exact match) ── */
+  .create-project-suppress {
+    padding: 8px 10px; font-size: 11px; color: #676879; font-style: italic;
+    border-top: 1px solid #e6e9ef; background: #f6f7fb;
+  }
+
+  /* ── Client picker header ── */
+  .client-picker-hdr {
+    padding: 7px 10px; font-size: 11px; font-weight: 600; color: #676879;
+    text-transform: uppercase; letter-spacing: .4px;
+    background: #f6f7fb; border-bottom: 1px solid #e6e9ef;
+  }
+
   /* ── Clockify connected state (settings drawer) ── */
   .ck-connected {
     display: flex; align-items: center; gap: 10px;
@@ -593,6 +613,8 @@ let isRefreshing        = false;
 let clockifyWorkspaceId = localStorage.getItem(CK_WS_STORE) || null;
 let clockifyProjects    = [];
 let nudgeTimer          = null;
+let pendingCreateName   = null; // set when dropdown is in client-picker mode
+let ckClients           = [];   // cached client list for current session
 
 try { clockifyProjects = JSON.parse(localStorage.getItem(CK_PROJ_STORE)) || []; } catch {}
 
@@ -728,16 +750,96 @@ async function connectClockify(key) {
   localStorage.setItem(CK_WS_STORE, wsId);
   localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
 }
-async function ckCreateProject(name) {
+
+// ── Create project (public by default, optional client) ──
+async function ckCreateProject(name, clientId) {
+  const body = { name, color: '#0073ea', isPublic: true, billable: true };
+  if (clientId) body.clientId = clientId;
   const proj = await ckPost(
     `/workspaces/${clockifyWorkspaceId}/projects`,
-    { name, color: '#0073ea', isPublic: false, billable: true },
+    body,
     getClockifyKey()
   );
   clockifyProjects.push(proj);
   localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
   return proj;
 }
+
+// ── Fetch clients ──
+async function ckFetchClients() {
+  try {
+    const clients = await ckFetch(
+      `/workspaces/${clockifyWorkspaceId}/clients?page-size=500`,
+      getClockifyKey()
+    );
+    return Array.isArray(clients) ? clients : [];
+  } catch { return []; }
+}
+
+// ── Duplicate detection helpers ──
+function isExactMatch(query, projectName) {
+  return query.trim().toLowerCase() === projectName.trim().toLowerCase();
+}
+function isCloseMatch(query, projectName) {
+  const q = query.trim().toLowerCase();
+  const p = projectName.trim().toLowerCase();
+  if (q === p) return false; // exact match handled separately
+  // Case code match (strongest signal)
+  const qCode = extractCaseCode(query), pCode = extractCaseCode(projectName);
+  if (qCode && pCode && qCode === pCode) return true;
+  // Substring match — require at least 4 chars to avoid noise
+  if (q.length >= 4 && p.includes(q)) return true;
+  if (p.length >= 4 && q.includes(p)) return true;
+  return false;
+}
+
+// ── Client picker & project creation ──
+async function doCreateProject(name, clientId) {
+  const dd = document.getElementById('billing-project-dd');
+  dd.innerHTML = '<div class="board-no-res">Creating project…</div>';
+  pendingCreateName = null;
+  try {
+    const proj = await ckCreateProject(name, clientId);
+    document.getElementById('billing-project-search').value = proj.name;
+    document.getElementById('billing-project-id').value = proj.id;
+    selectedProjectId = proj.id;
+    hideBillingProjectHint();
+    dd.classList.remove('open');
+    showToast('✓ Project created in Clockify');
+  } catch(err) {
+    dd.innerHTML = `<div class="board-no-res" style="color:#d83a52">Failed: ${escHtml(err.message)}</div>`;
+    setTimeout(() => { pendingCreateName = null; dd.classList.remove('open'); }, 2500);
+  }
+}
+
+function renderClientPicker(projectName) {
+  const dd = document.getElementById('billing-project-dd');
+  dd.innerHTML = '';
+  const hdr = document.createElement('div');
+  hdr.className = 'client-picker-hdr';
+  hdr.textContent = `Select a client for "${projectName}"`;
+  dd.appendChild(hdr);
+  const noClient = document.createElement('div');
+  noClient.className = 'board-opt';
+  noClient.textContent = 'No client';
+  noClient.addEventListener('mousedown', e => { e.preventDefault(); doCreateProject(projectName, null); });
+  dd.appendChild(noClient);
+  if (!ckClients.length) {
+    const empty = document.createElement('div');
+    empty.className = 'board-no-res';
+    empty.textContent = 'No clients found in this workspace.';
+    dd.appendChild(empty);
+  } else {
+    ckClients.forEach(client => {
+      const el = document.createElement('div');
+      el.className = 'board-opt';
+      el.textContent = client.name;
+      el.addEventListener('mousedown', e => { e.preventDefault(); doCreateProject(projectName, client.id); });
+      dd.appendChild(el);
+    });
+  }
+}
+
 async function createTimeEntry(projectId, description, durationSecs) {
   const end   = new Date();
   const start = new Date(end.getTime() - durationSecs * 1000);
@@ -791,6 +893,9 @@ document.getElementById('nudge-link').addEventListener('click', () => {
 
 // ── Searchable Clockify project picker ──
 function renderProjectDropdown(query) {
+  // If we're in client-picker mode, hand off to that renderer
+  if (pendingCreateName) { renderClientPicker(pendingCreateName); return; }
+
   const q  = (query || '').toLowerCase();
   const dd = document.getElementById('billing-project-dd');
   const filtered = [...clockifyProjects]
@@ -801,7 +906,6 @@ function renderProjectDropdown(query) {
       return a.name.localeCompare(b.name);
     });
   dd.innerHTML = '';
-  // Show hint only when the create option is visible (i.e. user has typed a query)
   document.getElementById('billing-project-hint').style.display = q ? 'block' : 'none';
 
   // "No project" option
@@ -840,30 +944,45 @@ function renderProjectDropdown(query) {
     });
   }
 
-  // "Create project" option — shown whenever there is a query
+  // ── Create project option — with duplicate protection ──
   if (q) {
-    const createEl = document.createElement('div');
-    createEl.className = 'board-opt create-project-opt';
-    createEl.textContent = `＋ Create "${query}" in Clockify`;
-    createEl.addEventListener('mousedown', async e => {
-      e.preventDefault();
-      createEl.textContent = 'Creating…';
-      createEl.style.pointerEvents = 'none';
-      try {
-        const proj = await ckCreateProject(query);
-        document.getElementById('billing-project-search').value = proj.name;
-        document.getElementById('billing-project-id').value = proj.id;
-        selectedProjectId = proj.id;
-        hideBillingProjectHint();
-        dd.classList.remove('open');
-        showToast('✓ Project created in Clockify');
-      } catch(err) {
-        createEl.textContent = `Failed: ${err.message}`;
-        createEl.style.color = '#d83a52';
-        createEl.style.pointerEvents = 'auto';
+    const exactHit = clockifyProjects.find(p => isExactMatch(query, p.name));
+
+    if (exactHit) {
+      // Suppress: project already exists under this exact name
+      const suppressEl = document.createElement('div');
+      suppressEl.className = 'create-project-suppress';
+      suppressEl.textContent = `"${exactHit.name}" already exists — select it above.`;
+      dd.appendChild(suppressEl);
+
+    } else {
+      const closeMatches = clockifyProjects.filter(p => isCloseMatch(query, p.name));
+      const createEl = document.createElement('div');
+
+      if (closeMatches.length) {
+        // Warn: similar project(s) found, require deliberate second click
+        createEl.className = 'board-opt create-project-warn';
+        const similarLabel = closeMatches.length === 1
+          ? `"${closeMatches[0].name}"`
+          : `${closeMatches.length} similar projects`;
+        createEl.textContent = `＋ Create "${query}" — similar to ${similarLabel}. Create anyway?`;
+      } else {
+        // Clear path: no conflicts found
+        createEl.className = 'board-opt create-project-opt';
+        createEl.textContent = `＋ Create "${query}" in Clockify`;
       }
-    });
-    dd.appendChild(createEl);
+
+      createEl.addEventListener('mousedown', async e => {
+        e.preventDefault();
+        pendingCreateName = query;
+        createEl.textContent = 'Loading clients…';
+        createEl.style.pointerEvents = 'none';
+        ckClients = await ckFetchClients();
+        renderProjectDropdown(query);
+        billingProjDd.classList.add('open');
+      });
+      dd.appendChild(createEl);
+    }
   }
 }
 
@@ -876,6 +995,7 @@ billingProjInput.addEventListener('focus', function() {
 });
 billingProjInput.addEventListener('input', function() {
   selectedProjectId = '';
+  pendingCreateName = null;
   document.getElementById('billing-project-id').value = '';
   renderProjectDropdown(this.value);
   billingProjDd.classList.add('open');
@@ -884,6 +1004,7 @@ billingProjInput.addEventListener('blur', function() {
   setTimeout(() => {
     billingProjDd.classList.remove('open');
     hideBillingProjectHint();
+    pendingCreateName = null;
     if (!selectedProjectId) {
       document.getElementById('billing-project-id').value = '';
     }
@@ -907,6 +1028,7 @@ billingProjInput.addEventListener('keydown', function(e) {
     const hi = billingProjDd.querySelector('.board-opt.hi');
     if (hi) hi.dispatchEvent(new MouseEvent('mousedown'));
   } else if (e.key === 'Escape') {
+    pendingCreateName = null;
     billingProjDd.classList.remove('open');
     this.blur();
   }
@@ -917,16 +1039,15 @@ function showBillingModal(item) {
   document.getElementById('billing-task-label').textContent = item.name;
   const matched = matchProject(item.board);
   selectedProjectId = matched ? matched.id : '';
-  // Pre-fill with matched project name, or the board name as an editable default
   document.getElementById('billing-project-search').value = matched ? matched.name : item.board;
   document.getElementById('billing-project-id').value = selectedProjectId;
-  // Hint is hidden on open — it only appears when the user is actively creating a new project
   document.getElementById('billing-project-hint').style.display = 'none';
   document.getElementById('billing-duration').value    = '';
   document.getElementById('billing-description').value = item.name;
   document.getElementById('billing-err').textContent   = '';
   document.getElementById('billing-submit').disabled   = false;
   document.getElementById('billing-submit').textContent = 'Log Time';
+  pendingCreateName = null;
   document.getElementById('modal-overlay').classList.add('open');
   document.getElementById('billing-modal').classList.add('open');
   setTimeout(() => document.getElementById('billing-duration').focus(), 50);
@@ -934,6 +1055,7 @@ function showBillingModal(item) {
 function hideBillingModal() {
   document.getElementById('modal-overlay').classList.remove('open');
   document.getElementById('billing-modal').classList.remove('open');
+  pendingCreateName = null;
 }
 
 document.getElementById('billing-skip').addEventListener('click', hideBillingModal);
@@ -967,7 +1089,6 @@ function renderSettingsContent() {
   const content = document.getElementById('settings-content');
   let html = '';
 
-  // ── Clockify section ──
   html += `<div class="settings-section-label">Clockify</div>`;
   if (getClockifyKey() && clockifyWorkspaceId) {
     html += `
@@ -995,7 +1116,6 @@ function renderSettingsContent() {
       <div class="drawer-err" id="settings-ck-err"></div>`;
   }
 
-  // ── Pinned boards section ──
   html += `<div class="settings-section-label" style="margin-top:20px">Pinned Boards</div>`;
   const pins = getPins();
   const pinnedBoards = [...pins]
@@ -1017,7 +1137,6 @@ function renderSettingsContent() {
 
   content.innerHTML = html;
 
-  // ── Wire up Clockify handlers ──
   if (getClockifyKey() && clockifyWorkspaceId) {
     document.getElementById('ck-disconnect').addEventListener('click', () => {
       clearClockifyData();
@@ -1049,7 +1168,6 @@ function renderSettingsContent() {
     setTimeout(() => input.focus(), 50);
   }
 
-  // ── Wire up unpin buttons ──
   content.querySelectorAll('.unpin-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const p = getPins();
