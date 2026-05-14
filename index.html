@@ -819,11 +819,6 @@ function renderClientPicker(projectName) {
   hdr.className = 'client-picker-hdr';
   hdr.textContent = `Select a client for "${projectName}"`;
   dd.appendChild(hdr);
-  const noClient = document.createElement('div');
-  noClient.className = 'board-opt';
-  noClient.textContent = 'No client';
-  noClient.addEventListener('mousedown', e => { e.preventDefault(); doCreateProject(projectName, null); });
-  dd.appendChild(noClient);
   if (!ckClients.length) {
     const empty = document.createElement('div');
     empty.className = 'board-no-res';
@@ -838,6 +833,10 @@ function renderClientPicker(projectName) {
       dd.appendChild(el);
     });
   }
+  const notice = document.createElement('div');
+  notice.className = 'create-project-suppress';
+  notice.textContent = "Client not listed? Confirm with the Head of CS that you're okay to add a new client, then do so directly from Clockify's site to associate projects with them moving forward.";
+  dd.appendChild(notice);
 }
 
 async function createTimeEntry(projectId, description, durationSecs) {
