@@ -92,6 +92,27 @@
   .chevron { font-size: 10px; color: #676879; transition: transform .15s; }
   .chevron.open { transform: rotate(90deg); }
 
+  /* ── Pin button ── */
+  .pin-btn {
+    background: none; border: none; cursor: pointer;
+    font-size: 13px; color: #c3c6d4; padding: 2px 4px;
+    border-radius: 4px; line-height: 1; transition: color .15s;
+    flex-shrink: 0; opacity: 0;
+  }
+  .group-header:hover .pin-btn { opacity: 1; }
+  .pin-btn.pinned { color: #fdab3d; opacity: 1; }
+  .pin-btn:hover { color: #fdab3d !important; opacity: 1; }
+
+  /* ── Section dividers (Pinned / All Boards) ── */
+  .section-divider {
+    font-size: 10px; font-weight: 700; color: #c3c6d4;
+    text-transform: uppercase; letter-spacing: .6px;
+    padding: 2px 6px 6px;
+  }
+  .section-divider.with-border {
+    border-top: 1px solid #e6e9ef; margin-top: 6px; padding-top: 10px;
+  }
+
   /* ── Cards ── */
   .cards { display: flex; flex-direction: column; gap: 6px; }
   .card {
@@ -305,6 +326,27 @@
     opacity: 0; transition: opacity .2s; pointer-events: none; white-space: nowrap; z-index: 9998;
   }
   .toast.show { opacity: 1; }
+
+  /* ── Pinned boards settings list ── */
+  .pinned-board-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 0; border-bottom: 1px solid #f0f2f8;
+  }
+  .pinned-board-row:last-child { border-bottom: none; }
+  .pinned-board-name { font-size: 13px; color: #323338; flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 8px; }
+  .unpin-btn {
+    padding: 3px 10px; background: #f0f2f8; color: #676879;
+    border: none; border-radius: 5px; font-size: 11px; font-weight: 500;
+    cursor: pointer; flex-shrink: 0; white-space: nowrap;
+  }
+  .unpin-btn:hover { background: #e6e9ef; color: #323338; }
+  .settings-section-label {
+    font-size: 11px; font-weight: 600; color: #676879;
+    text-transform: uppercase; letter-spacing: .4px;
+    margin: 16px 0 8px;
+  }
+  .settings-section-label:first-child { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -358,8 +400,8 @@
     <div class="topbar-row2">
       <span class="topbar-summary" id="summary"></span>
       <div class="group-toggle">
-        <button class="toggle-btn active" id="btn-status" data-group="status">By Status</button>
-        <button class="toggle-btn" id="btn-board" data-group="board">By Board</button>
+        <button class="toggle-btn" id="btn-status" data-group="status">By Status</button>
+        <button class="toggle-btn active" id="btn-board" data-group="board">By Board</button>
       </div>
     </div>
   </div>
@@ -522,8 +564,9 @@ const STORAGE_KEY      = 'monday_api_token';
 const GROUP_KEY        = 'monday_group_by';
 const CACHE_KEY        = 'monday_items_cache';
 const BOARDS_CACHE_KEY = 'monday_boards_cache';
+const PINS_KEY         = 'monday_pinned_boards';
 const BATCH_SIZE       = 10;
-const BOARDS_PAGE_SIZE = 100;   // boards fetched per API page; paginated automatically
+const BOARDS_PAGE_SIZE = 100;
 const CLOCKIFY_API     = 'https://api.clockify.me/api/v1';
 const CK_KEY_STORE     = 'clockify_api_key';
 const CK_WS_STORE      = 'clockify_workspace';
@@ -535,7 +578,7 @@ let cachedBoards        = [];
 let selectedBoardId     = '';
 let selectedProjectId   = '';
 let currentUserId       = null;
-let groupBy             = localStorage.getItem(GROUP_KEY) || 'status';
+let groupBy             = localStorage.getItem(GROUP_KEY) || 'board';
 let isRefreshing        = false;
 let clockifyWorkspaceId = localStorage.getItem(CK_WS_STORE) || null;
 let clockifyProjects    = [];
@@ -588,6 +631,14 @@ function clearClockifyData() {
   localStorage.removeItem(CK_KEY_STORE);
   localStorage.removeItem(CK_WS_STORE);
   localStorage.removeItem(CK_PROJ_STORE);
+}
+
+// ── Pins ──
+function getPins() {
+  try { return new Set(JSON.parse(localStorage.getItem(PINS_KEY)) || []); } catch { return new Set(); }
+}
+function savePins(pins) {
+  localStorage.setItem(PINS_KEY, JSON.stringify([...pins]));
 }
 
 // ── Cache ──
@@ -727,7 +778,6 @@ function renderProjectDropdown(query) {
       return a.name.localeCompare(b.name);
     });
   dd.innerHTML = '';
-  // "No project" option always appears first
   const noneEl = document.createElement('div');
   noneEl.className = 'board-opt' + (!selectedProjectId ? ' chosen' : '');
   noneEl.textContent = 'No project selected';
@@ -856,8 +906,12 @@ document.getElementById('billing-submit').addEventListener('click', async () => 
 // ── Settings drawer ──
 function renderSettingsContent() {
   const content = document.getElementById('settings-content');
+  let html = '';
+
+  // ── Clockify section ──
+  html += `<div class="settings-section-label">Clockify</div>`;
   if (getClockifyKey() && clockifyWorkspaceId) {
-    content.innerHTML = `
+    html += `
       <div class="ck-connected">
         <div class="ck-check">✓</div>
         <div>
@@ -865,17 +919,9 @@ function renderSettingsContent() {
           <div style="font-size:11px;color:#676879;margin-top:2px">${clockifyProjects.length} project${clockifyProjects.length !== 1 ? 's' : ''} loaded</div>
         </div>
       </div>
-      <button class="btn-secondary" id="ck-disconnect" style="width:100%">Disconnect Clockify</button>
-    `;
-    document.getElementById('ck-disconnect').addEventListener('click', () => {
-      clearClockifyData();
-      clockifyWorkspaceId = null;
-      clockifyProjects = [];
-      updateClockifyDot();
-      renderSettingsContent();
-    });
+      <button class="btn-secondary" id="ck-disconnect" style="width:100%">Disconnect Clockify</button>`;
   } else {
-    content.innerHTML = `
+    html += `
       <p style="font-size:12px;color:#676879;margin-bottom:12px;line-height:1.5">
         Connect Clockify to log billable time whenever you update a task status.
       </p>
@@ -887,8 +933,41 @@ function renderSettingsContent() {
       <div class="drawer-actions" style="margin-top:4px">
         <button class="btn-primary" id="settings-ck-connect" style="flex:1">Connect Clockify</button>
       </div>
-      <div class="drawer-err" id="settings-ck-err"></div>
-    `;
+      <div class="drawer-err" id="settings-ck-err"></div>`;
+  }
+
+  // ── Pinned boards section ──
+  html += `<div class="settings-section-label" style="margin-top:20px">Pinned Boards</div>`;
+  const pins = getPins();
+  const pinnedBoards = [...pins]
+    .map(id => cachedBoards.find(b => String(b.id) === String(id)))
+    .filter(Boolean);
+  if (!pinnedBoards.length) {
+    html += `<p style="font-size:12px;color:#676879;line-height:1.5">No boards pinned yet. Switch to By Board view and tap ☆ on any board to pin it.</p>`;
+  } else {
+    html += `<div id="pinned-boards-list">`;
+    pinnedBoards.forEach(b => {
+      html += `
+        <div class="pinned-board-row">
+          <span class="pinned-board-name" title="${escHtml(b.name)}">${escHtml(b.name)}</span>
+          <button class="unpin-btn" data-board-id="${escHtml(String(b.id))}">Unpin</button>
+        </div>`;
+    });
+    html += `</div>`;
+  }
+
+  content.innerHTML = html;
+
+  // ── Wire up Clockify handlers ──
+  if (getClockifyKey() && clockifyWorkspaceId) {
+    document.getElementById('ck-disconnect').addEventListener('click', () => {
+      clearClockifyData();
+      clockifyWorkspaceId = null;
+      clockifyProjects = [];
+      updateClockifyDot();
+      renderSettingsContent();
+    });
+  } else {
     const btn   = document.getElementById('settings-ck-connect');
     const input = document.getElementById('settings-ck-key');
     const doConnect = async () => {
@@ -910,7 +989,19 @@ function renderSettingsContent() {
     input.addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
     setTimeout(() => input.focus(), 50);
   }
+
+  // ── Wire up unpin buttons ──
+  content.querySelectorAll('.unpin-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = getPins();
+      p.delete(btn.dataset.boardId);
+      savePins(p);
+      renderSettingsContent();
+      renderBoard(currentItems, getToken());
+    });
+  });
 }
+
 function openSettings() {
   renderSettingsContent();
   document.getElementById('settings-overlay').classList.add('open');
@@ -1004,8 +1095,6 @@ function parseBoardItems(boardMeta, boardResult, userId) {
 }
 
 // ── Paginated board fetch ──
-// Fetches all boards across as many pages as needed, handling workspaces
-// with more than 100 boards without a hard cap.
 async function fetchAllBoards(token) {
   const boardMap = new Map();
   let page = 1;
@@ -1021,8 +1110,6 @@ async function fetchAllBoards(token) {
       ...(data.share || [])
     ].filter(b => b.type !== 'sub_items_board');
     pageBoards.forEach(b => boardMap.set(b.id, b));
-    // Stop when every kind returned fewer results than the page size —
-    // meaning there are no more pages to fetch.
     const maxReturned = Math.max(
       (data.pub   || []).length,
       (data.priv  || []).length,
@@ -1321,6 +1408,7 @@ function buildCard(item, token) {
   card.appendChild(top); card.appendChild(meta);
   return card;
 }
+
 function renderBoard(items, token) {
   document.querySelectorAll('.status-menu').forEach(m => m.remove());
   const boardEl = document.getElementById('board');
@@ -1337,20 +1425,29 @@ function renderBoard(items, token) {
       <span>No tasks assigned to you.</span></div>`;
     return;
   }
+
+  // Build groups — store boardId alongside items for pin lookups
   const groups = {};
   for (const item of items) {
     const key = groupBy==='board' ? item.board : item.status;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(item);
+    if (!groups[key]) groups[key] = { items: [], boardId: item.boardId };
+    groups[key].items.push(item);
   }
-  Object.keys(groups).sort((a, b) => {
+
+  const pins = getPins();
+
+  const sortedKeys = Object.keys(groups).sort((a, b) => {
     if (groupBy==='status') {
       const aD = /done|complet/i.test(a) ? 1 : 0, bD = /done|complet/i.test(b) ? 1 : 0;
       return aD - bD || a.localeCompare(b);
     }
     return a.localeCompare(b);
-  }).forEach(key => {
-    const grpItems = groups[key];
+  });
+
+  // Build a single group element; forceExpanded overrides default collapsed state
+  function buildGroup(key, forceExpanded) {
+    const { items: grpItems, boardId } = groups[key];
+    const isPinned = groupBy === 'board' && pins.has(String(boardId));
     const grp = document.createElement('div'); grp.className = 'group';
     const dotColor = groupBy==='status' ? statusColor(key) : '#0073ea';
     const hdr = document.createElement('div'); hdr.className = 'group-header';
@@ -1359,16 +1456,60 @@ function renderBoard(items, token) {
       <span class="group-label">${escHtml(key)}</span>
       <span class="group-count">${grpItems.length}</span>
       <span class="chevron">▶</span>`;
+
+    // Pin button — By Board view only
+    if (groupBy === 'board') {
+      const pinBtn = document.createElement('button');
+      pinBtn.className = 'pin-btn' + (isPinned ? ' pinned' : '');
+      pinBtn.title = isPinned ? 'Unpin board' : 'Pin board';
+      pinBtn.textContent = isPinned ? '★' : '☆';
+      pinBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const p = getPins();
+        p.has(String(boardId)) ? p.delete(String(boardId)) : p.add(String(boardId));
+        savePins(p);
+        renderBoard(currentItems, token);
+      });
+      hdr.appendChild(pinBtn);
+    }
+
     const cards = document.createElement('div'); cards.className = 'cards';
-    cards.style.display = 'none'; // collapsed by default
+    const expanded = forceExpanded || isPinned;
+    cards.style.display = expanded ? 'flex' : 'none';
+    if (expanded) hdr.querySelector('.chevron').classList.add('open');
     for (const item of grpItems) cards.appendChild(buildCard(item, token));
-    hdr.addEventListener('click', () => {
+    hdr.addEventListener('click', e => {
+      if (e.target.closest('.pin-btn')) return;
       const open = cards.style.display !== 'none';
       cards.style.display = open ? 'none' : 'flex';
       hdr.querySelector('.chevron').classList.toggle('open', !open);
     });
-    grp.appendChild(hdr); grp.appendChild(cards); boardEl.appendChild(grp);
-  });
+    grp.appendChild(hdr); grp.appendChild(cards);
+    return grp;
+  }
+
+  if (groupBy === 'board') {
+    const pinnedKeys   = sortedKeys.filter(k => pins.has(String(groups[k].boardId)));
+    const unpinnedKeys = sortedKeys.filter(k => !pins.has(String(groups[k].boardId)));
+
+    if (pinnedKeys.length) {
+      const lbl = document.createElement('div');
+      lbl.className = 'section-divider';
+      lbl.textContent = 'Pinned';
+      boardEl.appendChild(lbl);
+      pinnedKeys.forEach(k => boardEl.appendChild(buildGroup(k, true)));
+    }
+
+    if (unpinnedKeys.length) {
+      const lbl = document.createElement('div');
+      lbl.className = 'section-divider' + (pinnedKeys.length ? ' with-border' : '');
+      lbl.textContent = pinnedKeys.length ? 'All Boards' : '';
+      if (pinnedKeys.length) boardEl.appendChild(lbl);
+      unpinnedKeys.forEach(k => boardEl.appendChild(buildGroup(k, false)));
+    }
+  } else {
+    sortedKeys.forEach(key => boardEl.appendChild(buildGroup(key, false)));
+  }
 }
 
 // ── Load ──
