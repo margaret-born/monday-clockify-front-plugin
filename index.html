@@ -253,6 +253,13 @@
   .board-opt.chosen { color: #0073ea; font-weight: 600; }
   .board-no-res { padding: 8px 10px; font-size: 12px; color: #676879; font-style: italic; }
 
+  /* ── Create project option ── */
+  .create-project-opt {
+    color: #0073ea; font-weight: 500;
+    border-top: 1px solid #e6e9ef !important;
+  }
+  .create-project-opt:hover { background: #f0f8ff; }
+
   /* ── Clockify connected state (settings drawer) ── */
   .ck-connected {
     display: flex; align-items: center; gap: 10px;
@@ -481,10 +488,13 @@
   <div class="field">
     <label>Clockify project</label>
     <div class="board-search-wrap">
-      <input id="billing-project-search" type="text" placeholder="Search projects…" autocomplete="off"/>
+      <input id="billing-project-search" type="text" placeholder="Search or create a project…" autocomplete="off"/>
       <div class="board-dd" id="billing-project-dd"></div>
     </div>
     <input type="hidden" id="billing-project-id"/>
+    <div class="hint" id="billing-project-hint" style="display:none">
+      Include the case code (e.g. ABC01-2345) so this project links correctly to your Monday board.
+    </div>
   </div>
   <div class="field">
     <label>Duration <span class="req">*</span></label>
@@ -618,6 +628,9 @@ function updateClockifyDot() {
     ? `Clockify connected · ${clockifyProjects.length} project${clockifyProjects.length !== 1 ? 's' : ''}`
     : 'Clockify not connected';
 }
+function hideBillingProjectHint() {
+  document.getElementById('billing-project-hint').style.display = 'none';
+}
 
 // ── Monday token ──
 function getToken()   { return localStorage.getItem(STORAGE_KEY); }
@@ -715,6 +728,16 @@ async function connectClockify(key) {
   localStorage.setItem(CK_WS_STORE, wsId);
   localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
 }
+async function ckCreateProject(name) {
+  const proj = await ckPost(
+    `/workspaces/${clockifyWorkspaceId}/projects`,
+    { name, color: '#0073ea', isPublic: false, billable: true },
+    getClockifyKey()
+  );
+  clockifyProjects.push(proj);
+  localStorage.setItem(CK_PROJ_STORE, JSON.stringify(clockifyProjects));
+  return proj;
+}
 async function createTimeEntry(projectId, description, durationSecs) {
   const end   = new Date();
   const start = new Date(end.getTime() - durationSecs * 1000);
@@ -778,6 +801,8 @@ function renderProjectDropdown(query) {
       return a.name.localeCompare(b.name);
     });
   dd.innerHTML = '';
+
+  // "No project" option
   const noneEl = document.createElement('div');
   noneEl.className = 'board-opt' + (!selectedProjectId ? ' chosen' : '');
   noneEl.textContent = 'No project selected';
@@ -786,29 +811,58 @@ function renderProjectDropdown(query) {
     document.getElementById('billing-project-search').value = '';
     document.getElementById('billing-project-id').value = '';
     selectedProjectId = '';
+    hideBillingProjectHint();
     dd.classList.remove('open');
   });
   dd.appendChild(noneEl);
+
   if (!filtered.length && q) {
     const el = document.createElement('div');
     el.className = 'board-no-res';
     el.textContent = 'No projects match your search.';
     dd.appendChild(el);
-    return;
-  }
-  filtered.forEach(p => {
-    const el = document.createElement('div');
-    el.className = 'board-opt' + (p.id === selectedProjectId ? ' chosen' : '');
-    el.textContent = p.name;
-    el.addEventListener('mousedown', e => {
-      e.preventDefault();
-      document.getElementById('billing-project-search').value = p.name;
-      document.getElementById('billing-project-id').value = p.id;
-      selectedProjectId = p.id;
-      dd.classList.remove('open');
+  } else {
+    filtered.forEach(p => {
+      const el = document.createElement('div');
+      el.className = 'board-opt' + (p.id === selectedProjectId ? ' chosen' : '');
+      el.textContent = p.name;
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        document.getElementById('billing-project-search').value = p.name;
+        document.getElementById('billing-project-id').value = p.id;
+        selectedProjectId = p.id;
+        hideBillingProjectHint();
+        dd.classList.remove('open');
+      });
+      dd.appendChild(el);
     });
-    dd.appendChild(el);
-  });
+  }
+
+  // "Create project" option — shown whenever there is a query
+  if (q) {
+    const createEl = document.createElement('div');
+    createEl.className = 'board-opt create-project-opt';
+    createEl.textContent = `＋ Create "${query}" in Clockify`;
+    createEl.addEventListener('mousedown', async e => {
+      e.preventDefault();
+      createEl.textContent = 'Creating…';
+      createEl.style.pointerEvents = 'none';
+      try {
+        const proj = await ckCreateProject(query);
+        document.getElementById('billing-project-search').value = proj.name;
+        document.getElementById('billing-project-id').value = proj.id;
+        selectedProjectId = proj.id;
+        hideBillingProjectHint();
+        dd.classList.remove('open');
+        showToast('✓ Project created in Clockify');
+      } catch(err) {
+        createEl.textContent = `Failed: ${err.message}`;
+        createEl.style.color = '#d83a52';
+        createEl.style.pointerEvents = 'auto';
+      }
+    });
+    dd.appendChild(createEl);
+  }
 }
 
 const billingProjInput = document.getElementById('billing-project-search');
@@ -828,7 +882,6 @@ billingProjInput.addEventListener('blur', function() {
   setTimeout(() => {
     billingProjDd.classList.remove('open');
     if (!selectedProjectId) {
-      this.value = '';
       document.getElementById('billing-project-id').value = '';
     }
   }, 150);
@@ -861,8 +914,11 @@ function showBillingModal(item) {
   document.getElementById('billing-task-label').textContent = item.name;
   const matched = matchProject(item.board);
   selectedProjectId = matched ? matched.id : '';
-  document.getElementById('billing-project-search').value = matched ? matched.name : '';
+  // Pre-fill with matched project name, or the board name as an editable default
+  document.getElementById('billing-project-search').value = matched ? matched.name : item.board;
   document.getElementById('billing-project-id').value = selectedProjectId;
+  // Show the case code hint only when no existing project was matched
+  document.getElementById('billing-project-hint').style.display = matched ? 'none' : 'block';
   document.getElementById('billing-duration').value    = '';
   document.getElementById('billing-description').value = item.name;
   document.getElementById('billing-err').textContent   = '';
@@ -1426,7 +1482,6 @@ function renderBoard(items, token) {
     return;
   }
 
-  // Build groups — store boardId alongside items for pin lookups
   const groups = {};
   for (const item of items) {
     const key = groupBy==='board' ? item.board : item.status;
@@ -1444,7 +1499,6 @@ function renderBoard(items, token) {
     return a.localeCompare(b);
   });
 
-  // Build a single group element; forceExpanded overrides default collapsed state
   function buildGroup(key, forceExpanded) {
     const { items: grpItems, boardId } = groups[key];
     const isPinned = groupBy === 'board' && pins.has(String(boardId));
@@ -1457,7 +1511,6 @@ function renderBoard(items, token) {
       <span class="group-count">${grpItems.length}</span>
       <span class="chevron">▶</span>`;
 
-    // Pin button — By Board view only
     if (groupBy === 'board') {
       const pinBtn = document.createElement('button');
       pinBtn.className = 'pin-btn' + (isPinned ? ' pinned' : '');
